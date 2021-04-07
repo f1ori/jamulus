@@ -43,6 +43,13 @@
 # include <jack/midiport.h>
 #endif
 
+#if WITH_PIPEWIRE
+# include <pipewire/pipewire.h>
+#include <spa/param/audio/type-info.h>
+#include <spa/param/audio/format-utils.h>
+#include "ring_buffer.h"
+#endif
+
 
 /* Definitions ****************************************************************/
 #define NUM_IN_OUT_CHANNELS         2 // always stereo
@@ -115,6 +122,74 @@ protected:
 
     float fInOutLatencyMs;
 };
+
+#elif WITH_PIPEWIRE
+
+class CSound : public CSoundBase
+{
+    Q_OBJECT
+
+public:
+    static const uint8_t RING_FACTOR;
+    CSound ( void           (*fpNewProcessCallback) ( CVector<short>& psData, void* arg ),
+             void*          arg,
+             const QString& strMIDISetup,
+             const bool     bNoAutoJackConnect,
+             const QString& strPipewireClientName ) :
+        CSoundBase ( "Pipewire", fpNewProcessCallback, arg, strMIDISetup ),
+        iPipewireBufferSizeMono ( 0 ), bJackWasShutDown ( false ), fInOutLatencyMs ( 0.0f )
+    {
+        Q_UNUSED(bNoAutoJackConnect);
+        Q_UNUSED(strPipewireClientName);
+        OpenPipewire();
+    }
+
+    virtual ~CSound() { ClosePipewire(); }
+
+    virtual int  Init ( const int iNewPrefMonoBufferSize );
+    virtual void Start();
+    virtual void Stop();
+
+    virtual float GetInOutLatencyMs() { return fInOutLatencyMs; }
+
+    // these variables should be protected but cannot since we want
+    // to access them from the callback function
+    CVector<short> vecsTmpAudioSndCrdStereo;
+    RingBuffer<int16_t> mOutBuffer;
+
+    int            iPipewireBufferSizeMono;
+    int            iPipewireBufferSizeStero;
+    bool           bJackWasShutDown;
+
+    struct pw_thread_loop* loop;
+    struct pw_context* context;
+    struct pw_core* core;
+    struct pw_registry* registry;
+    struct pw_client_node *node;
+    //struct spa_hook registry_listener;
+    struct pw_stream *input_stream;
+    struct pw_stream *output_stream;
+    struct spa_audio_info input_format;
+
+protected:
+    void OpenPipewire();
+
+    void ClosePipewire();
+
+    // callbacks
+    static void    onProcessInput (void* userdata);
+    static void    onProcessOutput (void* userdata);
+    static void    onParamChangedInput(void *userdata, uint32_t id, const struct spa_pod *param);
+
+    void addOutputData();
+
+
+    //static int     bufferSizeCallback ( jack_nframes_t, void *arg );
+    //static void    shutdownCallback ( void* );
+
+    float fInOutLatencyMs;
+};
+
 #else
 // no sound -> dummy class definition
 #include "server.h"

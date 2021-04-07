@@ -294,7 +294,7 @@ void CSound::addOutputData(int channel_count)
                 const int32_t iCurSam = static_cast<int32_t> (
                     vecsTmpInputAudioSndCrdStereo[frmNum * channel_count+ channelNum] );
 
-                mOutBuffer.put ( ( static_cast<float> ( iCurSam ) ) / _MAXSHORT );
+                mOutBuffer.put ( ( static_cast<float> ( iCurSam ) ) / _MAXSHORT ); // TODO int32_t vs short?
             }
         }
     }

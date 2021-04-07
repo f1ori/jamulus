@@ -328,7 +328,8 @@ win32 {
     # unnecessarily without this workaround (#741):
     QMAKE_LFLAGS += -Wl,--as-needed
 
-    HEADERS += linux/sound.h
+    HEADERS += linux/sound.h \
+        linux/ringbuffer.h
     SOURCES += linux/sound.cpp
 
     # we assume to have lrintf() one moderately modern linux distributions
@@ -350,10 +351,10 @@ win32 {
             LIBS += -ljack
         } else {
             CONFIG += link_pkgconfig
-            PKGCONFIG += jack
+            PKGCONFIG += jack libpipewire-0.3
         }
 
-        DEFINES += WITH_JACK
+        DEFINES += WITH_PIPEWIRE # WITH_JACK
     }
 
     isEmpty(PREFIX) {
