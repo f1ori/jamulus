@@ -379,6 +379,22 @@ void CSound::shutdownCallback ( void* arg )
 const uint8_t CSound::RING_FACTOR = 10;
 
 
+class PwThreadLockGuard
+{
+public:
+    PwThreadLockGuard(struct pw_thread_loop* thread_loop) : mThreadLoop(thread_loop)
+    {
+        pw_thread_loop_lock(mThreadLoop);
+    }
+    ~PwThreadLockGuard()
+    {
+        pw_thread_loop_unlock(mThreadLoop);
+    }
+private:
+    struct pw_thread_loop* mThreadLoop;
+};
+
+
 void CSound::OpenPipewire()
 {
     pw_init(0, NULL);
@@ -387,73 +403,19 @@ void CSound::OpenPipewire()
     if (loop == nullptr)
         throw CGenErr("Could not create pipewire thread");
 
-    static const struct pw_stream_events input_stream_events = {
-        .version = PW_VERSION_STREAM_EVENTS,
-        .process = &CSound::onProcessInput,
-    };
-    input_stream = pw_stream_new_simple(
-                pw_thread_loop_get_loop(loop),
-                "audio-capture",
-                pw_properties_new(
-                    PW_KEY_MEDIA_TYPE, "Audio",
-                    PW_KEY_MEDIA_CATEGORY, "Capture",
-                    PW_KEY_MEDIA_ROLE, "Production",
-                    NULL),
-                &input_stream_events,
-                this);
-    if (input_stream == nullptr)
-        throw CGenErr("Could not create pipewire audio input");
+#if 1
+    context = pw_context_new(pw_thread_loop_get_loop(loop),
+                              pw_properties_new(
+                                  PW_KEY_CLIENT_NAME, "Jamulus",
+                                  NULL),
+                            0 /* user_data size */);
+    if (context == nullptr)
+        throw CGenErr("Could not create pipewire context");
 
-    static const struct pw_stream_events output_stream_events = {
-        .version = PW_VERSION_STREAM_EVENTS,
-        .process = &CSound::onProcessOutput,
-    };
-    output_stream = pw_stream_new_simple(
-                pw_thread_loop_get_loop(loop),
-                "audio-src",
-                pw_properties_new(
-                    PW_KEY_MEDIA_TYPE, "Audio",
-                    PW_KEY_MEDIA_CATEGORY, "Playback",
-                    PW_KEY_MEDIA_ROLE, "Production",
-                    NULL),
-                &output_stream_events,
-                this);
-    if (input_stream == nullptr)
-        throw CGenErr("Could not create pipewire audio output");
-
-    const struct spa_pod *params[1];
-    uint8_t buffer[1024];
-    static struct spa_pod_builder b = {buffer, sizeof(buffer), 0, {0, 0, 0}, {0, 0}};
-    // add support for SPA_AUDIO_FORMAT_F32P
-    static struct spa_audio_info_raw air = {.format = SPA_AUDIO_FORMAT_S16,
-                .rate = SYSTEM_SAMPLE_RATE_HZ,
-                .channels = 2 };
-    params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &air);
-
-    if (pw_stream_connect(input_stream,
-              PW_DIRECTION_INPUT,
-              PW_ID_ANY,
-              static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT
-                                                | PW_STREAM_FLAG_INACTIVE
-                                                | PW_STREAM_FLAG_MAP_BUFFERS),
-              params, 1) < 0)
-        throw CGenErr("Could not connect input stream");
-    // add PW_STREAM_FLAG_RT_PROCESS?
-
-    if (pw_stream_connect(output_stream,
-              PW_DIRECTION_OUTPUT,
-              PW_ID_ANY,
-              static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT
-                                                | PW_STREAM_FLAG_INACTIVE
-                                                | PW_STREAM_FLAG_MAP_BUFFERS),
-              params, 1) < 0)
-        throw CGenErr("Could not connect output stream");
-
-    pw_stream_set_active(output_stream, false);
-    pw_stream_set_active(input_stream, false);
-
-    // to set latency requirements, we need to create /get a node
-
+    core = pw_context_connect(context, NULL /* properties*/, 0 /*user_data_size*/);
+    if (core == nullptr)
+        throw CGenErr("Could not create pipewire core object");
+#endif
 #if 0
     context = pw_context_new(pw_thread_loop_get_loop(loop),
                     NULL /* properties */,
@@ -477,17 +439,15 @@ void CSound::OpenPipewire()
 void CSound::ClosePipewire()
 {
     //pw_proxy_destroy((struct pw_proxy*)registry);
-    //pw_core_disconnect(core);
-    //pw_context_destroy(context);
-    if (input_stream)
+    if (core)
     {
-        pw_stream_destroy(input_stream);
-        input_stream = NULL;
+        pw_core_disconnect(core);
+        core = NULL;
     }
-    if (output_stream)
+    if (context)
     {
-         pw_stream_destroy(output_stream);
-         output_stream = NULL;
+        pw_context_destroy(context);
+        context = NULL;
     }
     if (loop)
     {
@@ -498,33 +458,141 @@ void CSound::ClosePipewire()
 }
 
 
+void CSound::OpenStreams()
+{
+    PwThreadLockGuard lock_guard(loop);
+
+    char latency[128];
+    snprintf(latency, sizeof(latency), "%d/%d", iPipewireBufferSizeMono, SYSTEM_SAMPLE_RATE_HZ);
+
+    static const struct pw_stream_events input_stream_events = {
+        .version = PW_VERSION_STREAM_EVENTS,
+        .destroy = &CSound::onDestroyedInput,
+        .state_changed = &CSound::onStateChangedInput,
+        .control_info = nullptr,
+        .io_changed = nullptr,
+        .param_changed = &CSound::onParamChangedInput,
+        .add_buffer = nullptr,
+        .remove_buffer = nullptr,
+        .process = &CSound::onProcessInput,
+        .drained = nullptr,
+    };
+    input_stream = pw_stream_new_simple(
+                pw_thread_loop_get_loop(loop),
+                "audio-capture",
+                pw_properties_new(
+                    PW_KEY_MEDIA_TYPE, "Audio",
+                    PW_KEY_MEDIA_CATEGORY, "Capture",
+                    PW_KEY_MEDIA_ROLE, "Production",
+                    PW_KEY_NODE_LATENCY, latency,
+                    NULL),
+                &input_stream_events,
+                this);
+    if (input_stream == nullptr)
+        throw CGenErr("Could not create pipewire audio input");
+
+    static const struct pw_stream_events output_stream_events = {
+        .version = PW_VERSION_STREAM_EVENTS,
+        .destroy = nullptr,
+        .state_changed = nullptr,
+        .control_info=nullptr,
+        .io_changed=nullptr,
+        .param_changed=nullptr,
+        .add_buffer=nullptr,
+        .remove_buffer=nullptr,
+        .process = &CSound::onProcessOutput,
+        .drained=nullptr,
+    };
+    output_stream = pw_stream_new_simple(
+                pw_thread_loop_get_loop(loop),
+                "audio-src",
+                pw_properties_new(
+                    PW_KEY_MEDIA_TYPE, "Audio",
+                    PW_KEY_MEDIA_CATEGORY, "Playback",
+                    PW_KEY_MEDIA_ROLE, "Production",
+                    PW_KEY_NODE_LATENCY, latency,
+                    NULL),
+                &output_stream_events,
+                this);
+    if (input_stream == nullptr)
+        throw CGenErr("Could not create pipewire audio output");
+
+    const struct spa_pod *params[1];
+    uint8_t buffer[1024];
+    static struct spa_pod_builder b = {buffer, sizeof(buffer), 0, {0, 0, 0}, {0, 0}};
+    // add support for SPA_AUDIO_FORMAT_F32P
+    static struct spa_audio_info_raw air = {
+                .format = SPA_AUDIO_FORMAT_S16,
+                .flags = 0,
+                .rate = SYSTEM_SAMPLE_RATE_HZ,
+                .channels = 2,
+                .position = {0}
+    };
+    params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &air);
+
+    if (pw_stream_connect(input_stream,
+              PW_DIRECTION_INPUT,
+              PW_ID_ANY,
+              static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT
+                                                | PW_STREAM_FLAG_MAP_BUFFERS),
+              params, 1) < 0)
+        throw CGenErr("Could not connect input stream");
+
+    // add PW_STREAM_FLAG_RT_PROCESS?
+
+    if (pw_stream_connect(output_stream,
+              PW_DIRECTION_OUTPUT,
+              PW_ID_ANY,
+              static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT
+                                                | PW_STREAM_FLAG_MAP_BUFFERS),
+              params, 1) < 0)
+        throw CGenErr("Could not connect output stream");
+
+    pw_log_warn("connected");
+}
+
+
+void CSound::CloseStreams()
+{
+    PwThreadLockGuard lock_guard(loop);
+
+    if (input_stream)
+    {
+        pw_stream_destroy(input_stream);
+        input_stream = NULL;
+    }
+    if (output_stream)
+    {
+         pw_stream_destroy(output_stream);
+         output_stream = NULL;
+    }
+}
+
+
 void CSound::Start()
 {
+    pw_log_warn("start");
     // call base class
     CSoundBase::Start();
 
-    pw_thread_loop_lock(loop);
-    pw_stream_set_active(output_stream, true);
-    pw_stream_set_active(input_stream, true);
-    pw_thread_loop_unlock(loop);
+    OpenStreams();
 }
 
 
 void CSound::Stop()
 {
-    pw_thread_loop_lock(loop);
-    pw_stream_set_active(input_stream, false);
-    pw_stream_set_active(output_stream, false);
-    pw_thread_loop_unlock(loop);
+    pw_log_warn("close");
+    CloseStreams();
 
     // call base class
     CSoundBase::Stop();
 }
 
-int CSound::Init ( const int /* iNewPrefMonoBufferSize */ )
+int CSound::Init ( const int iNewPrefMonoBufferSize )
 {
     pw_log_warn("init");
-    iPipewireBufferSizeMono = 1024;
+    iPipewireBufferSizeMono = iNewPrefMonoBufferSize;
+
     // init base class
     CSoundBase::Init ( iPipewireBufferSizeMono );
 
@@ -557,14 +625,13 @@ void CSound::onProcessInput(void* userdata)
     if (buf->datas[0].data == NULL)
         return;
 
-    pw_log_warn("input");
     if (pSound->IsRunning())
     {
         // copy input audio data
         struct spa_chunk* chunk = buf->datas[0].chunk;
         int n = std::min(static_cast<int>(chunk->size/sizeof(uint16_t)), pSound->vecsTmpAudioSndCrdStereo.Size());
         int16_t* data = reinterpret_cast<int16_t*>(static_cast<uint8_t*>(buf->datas[0].data) + chunk->offset);
-        pw_log_warn("input frames %d stride %d", n, chunk->stride);
+        //pw_log_warn("input frames %d", n);
         if (n != pSound->iPipewireBufferSizeStero)
             pw_log_warn("incomplete frame (size=%d)", n);
 
@@ -620,7 +687,6 @@ void CSound::onProcessOutput(void* userdata)
     CSound* pSound = static_cast<CSound*>(userdata);
     QMutexLocker locker ( &pSound->MutexAudioProcessCallback );
 
-    pw_log_warn("output");
     if (!pSound->IsRunning())
         return;
 
@@ -645,8 +711,9 @@ void CSound::onProcessOutput(void* userdata)
         return;
     size_t n_frames = std::min(static_cast<size_t>(buf->datas[0].maxsize / sizeof(int16_t)),
                                pSound->mOutBuffer.size());
-    n_frames = n_frames > pSound->iPipewireBufferSizeStero? pSound->iPipewireBufferSizeStero : n_frames;
-    pw_log_warn("output frames %d", n_frames);
+    n_frames = std::min(n_frames, static_cast<size_t>(pSound->iPipewireBufferSizeStero));
+    //n_frames = n_frames > pSound->iPipewireBufferSizeStero? pSound->iPipewireBufferSizeStero : n_frames;
+    //pw_log_warn("output frames %d %d", n_frames, pSound->iPipewireBufferSizeStero);
 
     pSound->mOutBuffer.get (dst, n_frames);
 
@@ -687,6 +754,17 @@ void CSound::onParamChangedInput(void *userdata, uint32_t id, const struct spa_p
     printf("  rate: %d channels: %d\n", pSound->input_format.info.raw.rate,
             pSound->input_format.info.raw.channels);
 
+}
+
+void CSound::onDestroyedInput(void* data)
+{
+  pw_log_warn("input destroyed");
+}
+
+void CSound::onStateChangedInput(void *data, enum pw_stream_state old,
+                                 enum pw_stream_state state, const char *error)
+{
+    pw_log_warn("input state changed %d", state);
 }
 
 

@@ -173,13 +173,17 @@ public:
 
 protected:
     void OpenPipewire();
-
     void ClosePipewire();
+    void OpenStreams();
+    void CloseStreams();
 
     // callbacks
     static void    onProcessInput (void* userdata);
     static void    onProcessOutput (void* userdata);
     static void    onParamChangedInput(void *userdata, uint32_t id, const struct spa_pod *param);
+    static void    onDestroyedInput(void* data);
+    static void    onStateChangedInput(void *data, enum pw_stream_state old,
+                                       enum pw_stream_state state, const char *error);
 
     void addOutputData();
 
