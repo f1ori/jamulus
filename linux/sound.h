@@ -184,6 +184,8 @@ protected:
     static void    onDestroyedInput(void* data);
     static void    onStateChangedInput(void *data, enum pw_stream_state old,
                                        enum pw_stream_state state, const char *error);
+    static void    onDrainedInput(void *data);
+
 
     void addOutputData();
 

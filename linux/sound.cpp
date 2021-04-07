@@ -403,7 +403,6 @@ void CSound::OpenPipewire()
     if (loop == nullptr)
         throw CGenErr("Could not create pipewire thread");
 
-#if 1
     context = pw_context_new(pw_thread_loop_get_loop(loop),
                               pw_properties_new(
                                   PW_KEY_CLIENT_NAME, "Jamulus",
@@ -415,7 +414,7 @@ void CSound::OpenPipewire()
     core = pw_context_connect(context, NULL /* properties*/, 0 /*user_data_size*/);
     if (core == nullptr)
         throw CGenErr("Could not create pipewire core object");
-#endif
+
 #if 0
     context = pw_context_new(pw_thread_loop_get_loop(loop),
                     NULL /* properties */,
@@ -475,7 +474,7 @@ void CSound::OpenStreams()
         .add_buffer = nullptr,
         .remove_buffer = nullptr,
         .process = &CSound::onProcessInput,
-        .drained = nullptr,
+        .drained = &CSound::onDrainedInput,
     };
     input_stream = pw_stream_new_simple(
                 pw_thread_loop_get_loop(loop),
@@ -534,16 +533,16 @@ void CSound::OpenStreams()
               PW_DIRECTION_INPUT,
               PW_ID_ANY,
               static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT
+                                                | PW_STREAM_FLAG_RT_PROCESS
                                                 | PW_STREAM_FLAG_MAP_BUFFERS),
               params, 1) < 0)
         throw CGenErr("Could not connect input stream");
-
-    // add PW_STREAM_FLAG_RT_PROCESS?
 
     if (pw_stream_connect(output_stream,
               PW_DIRECTION_OUTPUT,
               PW_ID_ANY,
               static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT
+                                                | PW_STREAM_FLAG_RT_PROCESS
                                                 | PW_STREAM_FLAG_MAP_BUFFERS),
               params, 1) < 0)
         throw CGenErr("Could not connect output stream");
@@ -629,6 +628,7 @@ void CSound::onProcessInput(void* userdata)
     {
         // copy input audio data
         struct spa_chunk* chunk = buf->datas[0].chunk;
+        //pw_log_warn("input chunks %d", (buf->datas[0].chunk + 1));
         int n = std::min(static_cast<int>(chunk->size/sizeof(uint16_t)), pSound->vecsTmpAudioSndCrdStereo.Size());
         int16_t* data = reinterpret_cast<int16_t*>(static_cast<uint8_t*>(buf->datas[0].data) + chunk->offset);
         //pw_log_warn("input frames %d", n);
@@ -765,6 +765,12 @@ void CSound::onStateChangedInput(void *data, enum pw_stream_state old,
                                  enum pw_stream_state state, const char *error)
 {
     pw_log_warn("input state changed %d", state);
+}
+
+
+void CSound::onDrainedInput(void *data)
+{
+    pw_log_warn("input drained");
 }
 
 
