@@ -519,9 +519,8 @@ void CSound::OpenStreams()
     const struct spa_pod *params[1];
     uint8_t buffer[1024];
     static struct spa_pod_builder b = {buffer, sizeof(buffer), 0, {0, 0, 0}, {0, 0}};
-    // add support for SPA_AUDIO_FORMAT_F32P
     static struct spa_audio_info_raw air = {
-                .format = SPA_AUDIO_FORMAT_S16,
+                .format = SPA_AUDIO_FORMAT_F32,
                 .flags = 0,
                 .rate = SYSTEM_SAMPLE_RATE_HZ,
                 .channels = 2,
@@ -546,8 +545,6 @@ void CSound::OpenStreams()
                                                 | PW_STREAM_FLAG_MAP_BUFFERS),
               params, 1) < 0)
         throw CGenErr("Could not connect output stream");
-
-    pw_log_warn("connected");
 }
 
 
@@ -626,17 +623,21 @@ void CSound::onProcessInput(void* userdata)
 
     if (pSound->IsRunning())
     {
+        int data_size = sizeof(float);
         // copy input audio data
         struct spa_chunk* chunk = buf->datas[0].chunk;
         //pw_log_warn("input chunks %d", (buf->datas[0].chunk + 1));
-        int n = std::min(static_cast<int>(chunk->size/sizeof(uint16_t)), pSound->vecsTmpAudioSndCrdStereo.Size());
-        int16_t* data = reinterpret_cast<int16_t*>(static_cast<uint8_t*>(buf->datas[0].data) + chunk->offset);
+        int n = std::min(static_cast<int>(chunk->size/data_size), pSound->vecsTmpAudioSndCrdStereo.Size());
+        uint8_t* data_ptr = static_cast<uint8_t*>(buf->datas[0].data) + chunk->offset;
         //pw_log_warn("input frames %d", n);
+        //pw_log_warn("buffer size %d", pSound->mOutBuffer.size());
         if (n != pSound->iPipewireBufferSizeStero)
             pw_log_warn("incomplete frame (size=%d)", n);
 
+        float* data = reinterpret_cast<float*>(data_ptr);
         for (int i = 0; i < n; i++ )
-            pSound->vecsTmpAudioSndCrdStereo[i] = *data++;
+            pSound->vecsTmpAudioSndCrdStereo[i] = Float2Short((*data++) * _MAXSHORT);
+
 
         for (int i = n; i < pSound->iPipewireBufferSizeStero; i++)
             pSound->vecsTmpAudioSndCrdStereo[i] = 0;
@@ -659,7 +660,9 @@ void CSound::addOutputData()
             for ( int channelNum = 0; channelNum < 2; channelNum++ )
             {
                 // copy sample received from server into output buffer
-                mOutBuffer.put ( vecsTmpAudioSndCrdStereo[frmNum * 2 + channelNum] );
+                const int32_t value = static_cast<int32_t> (
+                            vecsTmpAudioSndCrdStereo[frmNum * 2 + channelNum]);
+                mOutBuffer.put ( static_cast<float>(value) / _MAXSHORT );
             }
         }
     }
@@ -705,21 +708,22 @@ void CSound::onProcessOutput(void* userdata)
         return;
     }
 
-    int16_t *dst;
+    float *dst;
     buf = b->buffer;
-    if ((dst = static_cast<int16_t*>(buf->datas[0].data)) == NULL)
+    if ((dst = static_cast<float*>(buf->datas[0].data)) == NULL)
         return;
-    size_t n_frames = std::min(static_cast<size_t>(buf->datas[0].maxsize / sizeof(int16_t)),
+    size_t n_frames = std::min(static_cast<size_t>(buf->datas[0].maxsize / sizeof(float)),
                                pSound->mOutBuffer.size());
     n_frames = std::min(n_frames, static_cast<size_t>(pSound->iPipewireBufferSizeStero));
     //n_frames = n_frames > pSound->iPipewireBufferSizeStero? pSound->iPipewireBufferSizeStero : n_frames;
+
     //pw_log_warn("output frames %d %d", n_frames, pSound->iPipewireBufferSizeStero);
 
-    pSound->mOutBuffer.get (dst, n_frames);
+    pSound->mOutBuffer.get(dst, n_frames);
 
     buf->datas[0].chunk->offset = 0;
-    buf->datas[0].chunk->stride= sizeof(int16_t) * 2;
-    buf->datas[0].chunk->size = n_frames * sizeof(int16_t);
+    buf->datas[0].chunk->stride= sizeof(float) * 2;
+    buf->datas[0].chunk->size = n_frames * sizeof(float);
 
     if (pw_stream_queue_buffer(pSound->output_stream, b) < 0)
         pw_log_warn("Could not send: %m");
@@ -731,6 +735,7 @@ void CSound::onParamChangedInput(void *userdata, uint32_t id, const struct spa_p
     CSound* pSound = static_cast<CSound*>(userdata);
     QMutexLocker locker ( &pSound->MutexAudioProcessCallback );
 
+    // we are only interested to changes of the format parameter
     if (param == NULL || id != SPA_PARAM_Format)
         return;
 
@@ -746,13 +751,38 @@ void CSound::onParamChangedInput(void *userdata, uint32_t id, const struct spa_p
     if (spa_format_audio_raw_parse(param, &pSound->input_format.info.raw) < 0)
         return;
 
-    printf("got video format:\n");
-    /*
-    printf("  format: %d (%s)\n", pSound->format.info.raw.format,
-            spa_debug_type_find_name(spa_type_video_format,
-                data->format.info.raw.format));*/
+    printf("got audio format:\n");
     printf("  rate: %d channels: %d\n", pSound->input_format.info.raw.rate,
             pSound->input_format.info.raw.channels);
+
+}
+
+
+
+void CSound::onParamChangedOutput(void *userdata, uint32_t id, const struct spa_pod *param)
+{
+    CSound* pSound = static_cast<CSound*>(userdata);
+    QMutexLocker locker ( &pSound->MutexAudioProcessCallback );
+
+    // we are only interested to changes of the format parameter
+    if (param == NULL || id != SPA_PARAM_Format)
+        return;
+
+    if (spa_format_parse(param,
+            &pSound->output_format.media_type,
+            &pSound->output_format.media_subtype) < 0)
+        return;
+
+    if (pSound->output_format.media_type != SPA_MEDIA_TYPE_audio ||
+        pSound->output_format.media_subtype != SPA_MEDIA_SUBTYPE_raw)
+        return;
+
+    if (spa_format_audio_raw_parse(param, &pSound->output_format.info.raw) < 0)
+        return;
+
+    printf("got audio format:\n");
+    printf("  rate: %d channels: %d\n", pSound->output_format.info.raw.rate,
+            pSound->output_format.info.raw.channels);
 
 }
 

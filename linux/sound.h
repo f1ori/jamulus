@@ -155,7 +155,7 @@ public:
     // these variables should be protected but cannot since we want
     // to access them from the callback function
     CVector<short> vecsTmpAudioSndCrdStereo;
-    RingBuffer<int16_t> mOutBuffer;
+    RingBuffer<float> mOutBuffer;
 
     int            iPipewireBufferSizeMono;
     int            iPipewireBufferSizeStero;
@@ -170,6 +170,7 @@ public:
     struct pw_stream *input_stream;
     struct pw_stream *output_stream;
     struct spa_audio_info input_format;
+    struct spa_audio_info output_format;
 
 protected:
     void OpenPipewire();
@@ -181,6 +182,7 @@ protected:
     static void    onProcessInput (void* userdata);
     static void    onProcessOutput (void* userdata);
     static void    onParamChangedInput(void *userdata, uint32_t id, const struct spa_pod *param);
+    static void    onParamChangedOutput(void *userdata, uint32_t id, const struct spa_pod *param);
     static void    onDestroyedInput(void* data);
     static void    onStateChangedInput(void *data, enum pw_stream_state old,
                                        enum pw_stream_state state, const char *error);
